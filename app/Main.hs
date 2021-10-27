@@ -32,6 +32,7 @@ import Hasql.TH
 import Hasql.Session (Session)
 import Hasql.Statement (Statement(..))
 import Lucid
+import Lucid.Base (makeAttribute)
 import Lucid.HTMX
 import Lucid.HTMX.Servant
 import Network.Wai.Handler.Warp
@@ -50,7 +51,7 @@ import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Connection as Connection
 
 
--- COMMON STUFF START --
+{- COMMON START -}
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
@@ -58,11 +59,11 @@ showT = Text.pack . show
 readT :: Read a => Text -> a
 readT = read . Text.unpack
 
-blankHtml :: Html ()
-blankHtml = ""
+noHtml :: Html ()
+noHtml = ""
 
-baseHtml :: Monad m => Text -> HtmlT m a -> HtmlT m a
-baseHtml title innerHtml = do
+baseTemplate :: Monad m => Text -> HtmlT m a -> HtmlT m a
+baseTemplate title innerHtml = do
     doctype_
 
     html_ [lang_ "en"] ""
@@ -74,25 +75,17 @@ baseHtml title innerHtml = do
         title_ $ toHtml title
 
         link_ [href_ "https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css", rel_ "stylesheet"]
-        script_ [src_ "https://unpkg.com/htmx.org@1.5.0"] blankHtml
-        script_ [src_ "https://unpkg.com/htmx.org/dist/ext/json-enc.js"] blankHtml
+        script_ [src_ "https://unpkg.com/htmx.org@1.5.0"] noHtml
+        script_ [src_ "https://unpkg.com/htmx.org/dist/ext/json-enc.js"] noHtml
 
     body_ innerHtml
 
-textStyle_ = classes_ ["text-xl", "text-semibold"]
-
-buttonStyle_ color = classes_ ["px-4", "py-2", "bg-"<>color, "text-lg", "text-white", "rounded-md", "mt-5"]
-
--- COMMON STUFF END --
+{- COMMON STUFF END -}
 
 {- DATA MODEL START -}
 
-instance ToHtml Int32 where
-    toHtml = toHtml . showT
-    toHtmlRaw = toHtml
-
 newtype ID a = ID { unID :: Int32 }
-    deriving newtype (Eq, FromJSON, Show, ToHtml, FromHttpApiData, ToHttpApiData)
+    deriving newtype (Eq, FromJSON, Show, FromHttpApiData, ToHttpApiData)
 
 newtype Email = Email { unEmail :: Text }
     deriving newtype (FromJSON, Eq, Show, ToHtml)
@@ -100,9 +93,8 @@ newtype Email = Email { unEmail :: Text }
 newtype Name = Name { unName :: Text }
     deriving newtype (FromJSON, Eq, Show, ToHtml)
 
-data Status = Active | Inactive deriving (Eq, Show, Read, Generic, FromJSON)
-
--- instance FromJSON Status where
+data Status = Active | Inactive
+    deriving (Eq, Show, Read, Generic, FromJSON)
 
 data Contact = Contact
     { contactID :: ID Contact
@@ -112,7 +104,7 @@ data Contact = Contact
     }
     deriving (Eq, Show)
 
--- newtype ContactTable = ContactTable [Contact]
+type ContactTable = [Contact]
 
 newtype ContactForm = ContactForm (Maybe Contact)
 
@@ -121,9 +113,7 @@ data ContactFormData = ContactFormData
     , contactFormDataEmail :: Email
     , contactFormDataStatus :: Status
     }
-    deriving (Eq, Generic, Show, Aeson.FromJSON)
-
--- instance Aeson.FromJSON ContactFormData where
+    deriving (Eq, Generic, Show, FromJSON)
 
 {- DATA MODEL END -}
 
@@ -142,7 +132,8 @@ createContactsTable = Session.sql
             id serial primary key,
             name varchar (50) unique not null,
             email varchar (255) unique not null,
-            status varchar (10) not null
+            status varchar (10) not null,
+            created_at timestamp with time zone default current_timestamp
         );
     |]
 
@@ -180,7 +171,9 @@ insertCfdsStatement =
             select * from unnest ($1 :: text[], $2 :: text[], $3 :: text[])
         |]
     where
-        cfdsUnzip :: [ContactFormData] -> (Vector Text, Vector Text, Vector Text)
+        cfdsUnzip
+            :: [ContactFormData]
+            -> (Vector Text, Vector Text, Vector Text)
         cfdsUnzip = Vector.unzip3 . fmap cfdToTuple . Vector.fromList
 
 selectContactStatement :: Statement (ID Contact) Contact
@@ -194,14 +187,15 @@ selectContactStatement =
             where id = $1 :: int4
         |]
 
-selectContactsStatement :: Statement () [Contact]
-selectContactsStatement =
+selectContactTableStatement :: Statement () ContactTable
+selectContactTableStatement =
     dimap
         id
         (Vector.toList . fmap tupleToContact)
         [vectorStatement|
             select id :: int4, name :: text, email :: text, status :: text
             from contacts
+            order by "created_at"
         |]
 
 deleteContactStatement :: Statement (ID Contact) ()
@@ -227,13 +221,11 @@ updateContactStatement =
             returning id :: int4, name :: text, email :: text, status :: text
         |]
     where
-        cfdWithIDToTuple :: (ID Contact, ContactFormData) -> (Int32, Text, Text, Text)
+        cfdWithIDToTuple
+            :: (ID Contact, ContactFormData)
+            -> (Int32, Text, Text, Text)
         cfdWithIDToTuple (ID cID, ContactFormData (Name n) (Email e) status) =
-            ( cID
-            , n
-            , e
-            , showT status
-            )
+            (cID, n, e, showT status)
 
 {- SQL STATEMENTS END -}
 
@@ -247,17 +239,17 @@ insertCfd conn cfd = do
 
 insertCfds :: Connection.Connection -> [ContactFormData] -> IO ()
 insertCfds conn cfds = do
-    Right res <- Session.run (Session.statement cfds insertCfdsStatement) conn
-    pure res
+    res <- Session.run (Session.statement cfds insertCfdsStatement) conn
+    print res
 
 selectContact :: Connection.Connection -> ID Contact -> IO Contact
 selectContact conn cID = do
     Right res <- Session.run (Session.statement cID selectContactStatement) conn
     pure res
 
-selectContacts :: Connection.Connection -> IO [Contact]
-selectContacts conn = do
-    Right res <- Session.run (Session.statement () selectContactsStatement) conn
+selectContactTable :: Connection.Connection -> IO ContactTable
+selectContactTable conn = do
+    Right res <- Session.run (Session.statement () selectContactTableStatement) conn
     pure res
 
 deleteContact :: Connection.Connection -> ID Contact -> IO ()
@@ -274,15 +266,20 @@ updateContact conn cfdWithID = do
 
 {- API DEFINITION START -}
 
-type GetContactTable = Get '[HTML] [Contact]
+type GetContactTable = Get '[HTML] ContactTable
 
-type GetContactForm = "edit" :> Capture "contact-id" (ID Contact) :> Get '[HTML] ContactForm
+type GetContactForm = "edit"
+    :> Capture "contact-id" (ID Contact)
+    :> Get '[HTML] ContactForm
 
 type GetContact = Capture "contact-id" (ID Contact) :> Get '[HTML] Contact
 
 type PostContact = ReqBody '[JSON] ContactFormData :> Post '[HTML] Contact
 
-type PatchContact = "edit" :> Capture "contact-id" (ID Contact) :> ReqBody '[JSON] ContactFormData :> Patch '[HTML] Contact
+type PatchContact = "edit"
+    :> Capture "contact-id" (ID Contact)
+    :> ReqBody '[JSON] ContactFormData
+    :> Patch '[HTML] Contact
 
 type DeleteContact = Capture "contact-id" (ID Contact) :> Delete '[HTML] NoContent
 
@@ -322,8 +319,8 @@ apiProxy = Proxy
 
 {- HANDLERS START -}
 
-getContactTableHandler :: Connection.Connection -> Handler [Contact]
-getContactTableHandler = liftIO . selectContacts
+getContactTableHandler :: Connection.Connection -> Handler ContactTable
+getContactTableHandler = liftIO . selectContactTable
 
 getContactHandler :: Connection.Connection -> ID Contact -> Handler Contact
 getContactHandler conn = liftIO . selectContact conn
@@ -343,8 +340,7 @@ getContactFormHandler conn cID = do
     pure $ ContactForm $ Just contact
 
 server :: Connection.Connection -> Server API
-server conn =
-    getContactTableHandler conn
+server conn = getContactTableHandler conn
     :<|> getContactFormHandler conn
     :<|> getContactHandler conn
     :<|> postContactHandler conn
@@ -374,11 +370,23 @@ getContactFormLink = safeLink apiProxy getContactFormProxy
 
 {- HTML START -}
 
-tableCellStyle_ color =
-    class_ $ "border-4 border-blue-400 items-center justify-center px-4 py-2 bg-"<>color
+noAttr_ :: Attribute
+noAttr_ = makeAttribute "" ""
 
-tableButtonStyle_ color =
-    classes_ ["px-4", "py-2", "bg-red-500", "text-lg", "text-white", "rounded-md", "bg-"<>color]
+tableCellCss_ :: Text -> Attribute
+tableCellCss_ custom = class_ $
+    "border-4 items-center justify-center px-4 py-2 text-semibold text-lg text-center " <> custom
+
+tableHeaderCss_ :: Text -> Attribute
+tableHeaderCss_ = tableCellCss_
+
+buttonCss_ :: Text -> Attribute
+buttonCss_ custom = class_ $
+    "px-4 py-2 text-lg text-white rounded-md " <> custom
+
+instance ToHtml (ID a) where
+    toHtml = toHtml . showT
+    toHtmlRaw = toHtml
 
 instance ToHtml Status where
     toHtml = \case
@@ -388,29 +396,27 @@ instance ToHtml Status where
 
 instance ToHtml Contact where
     toHtml (Contact cID name email status) = do
-        let crID = "contact-row-" <> showT cID
-            crIDSelector = "#" <> crID
+        let rowId = "contact-row-" <> showT cID
 
-        tr_ [id_ crID] $ do
-            td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg text-center "] $ toHtml cID
-            td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg "] $ toHtml name
-            td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg "] $ toHtml email
-            td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg text-center "] $ toHtml status
-            td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg "] $ do
+        tr_ [id_ rowId] $ do
+            td_ [tableCellCss_ ""] $ toHtml cID
+            td_ [tableCellCss_ ""] $ toHtml name
+            td_ [tableCellCss_ ""] $ toHtml email
+            td_ [tableCellCss_ ""] $ toHtml status
+            td_ [tableCellCss_ ""] $ do
                 span_ [class_ "flex flex-row justify-center align-middle"] $ do
                     button_
-                        [ tableButtonStyle_ "pink-400"
-                        , class_ " mr-2 "
+                        [ buttonCss_ "mr-2 bg-purple-400"
                         , hxGetSafe_ $ getContactFormLink cID
-                        , hxTarget_ crIDSelector
+                        , hxTarget_ $ "#" <> rowId
                         , hxSwap_ "outerHTML"
                         ]
                         "Edit"
                     button_
-                        [ tableButtonStyle_ "red-400"
+                        [ buttonCss_ "bg-red-400"
                         , hxDeleteSafe_ $ deleteContactLink cID
                         , hxConfirm_ "Are you sure?"
-                        , hxTarget_ crIDSelector
+                        , hxTarget_ $ "#" <> rowId
                         , hxSwap_ "outerHTML"
                         ]
                         "Delete"
@@ -420,32 +426,39 @@ instance ToHtml ContactForm where
     toHtml (ContactForm maybeContact) = case maybeContact of
         Nothing -> do
             tr_ [id_ "add-contact-row"] $ do
-                td_ [tableCellStyle_ "green-300"] ""
-                td_ [tableCellStyle_ "green-300"] $ input_ [class_ "rounded-md px-2 add-contact-form-input", type_ "text", name_ "contactFormDataName"]
-                td_ [tableCellStyle_ "green-300"] $ input_ [class_ "rounded-md px-2 add-contact-form-input", type_ "text", name_ "contactFormDataEmail"]
-                td_ [tableCellStyle_ "green-300"] $ do
+                td_ [tableCellCss_ ""] ""
+                td_ [tableCellCss_ ""] $ input_
+                    [ class_ "rounded-md px-2 border-2 add-contact-form-input"
+                    , type_ "text"
+                    , name_ "contactFormDataName"
+                    ]
+                td_ [tableCellCss_ ""] $ input_
+                    [ class_ "rounded-md px-2 border-2 add-contact-form-input"
+                    , type_ "text"
+                    , name_ "contactFormDataEmail"
+                    ]
+                td_ [tableCellCss_ ""] $
                     form_ $ do
                         span_ [class_ "flex flex-col justify-center align-middle"] $ do
                             label_ [] $ do
                                 "Active"
                                 input_
                                     [ type_ "radio"
-                                    , name_ "contactFormStatus"
+                                    , name_ "contactFormDataStatus"
                                     , value_ $ showT Active
-                                    , class_ " ml-2 add-contact-form-input "
+                                    , class_ "ml-2 add-contact-form-input"
                                     ]
                             label_ [] $ do
                                 "Inactive"
                                 input_
                                     [ type_ "radio"
-                                    , name_ "contactFormStatus"
+                                    , name_ "contactFormDataStatus"
                                     , value_ $ showT Inactive
-                                    , class_ " ml-2 add-contact-form-input "
+                                    , class_ "ml-2 add-contact-form-input"
                                     ]
-                td_ [tableCellStyle_ "green-300"] $
+                td_ [tableCellCss_ ""] $
                     button_
-                        [ tableButtonStyle_ "purple-400"
-                        , class_ " w-full "
+                        [ buttonCss_ "w-full bg-green-400"
                         , hxExt_ "json-enc"
                         , hxPostSafe_ postContactLink
                         , hxTarget_ "#add-contact-row"
@@ -453,15 +466,27 @@ instance ToHtml ContactForm where
                         , hxInclude_ ".add-contact-form-input"
                         ]
                         "Add"
-        Just (Contact cID name email status) -> do
-            let rowID = "edit-contact-row-" <> showT cID
+        Just (Contact cID (Name name) (Email email) status) -> do
+            let editRowId = "edit-contact-row-" <> showT cID
                 inputClass = "edit-contact-form-" <> showT cID <> "-input"
 
-            tr_ [id_ rowID] $ do
-                td_ [tableCellStyle_ "green-300", class_ " text-semibold text-lg text-center "] $ toHtml cID
-                td_ [tableCellStyle_ "green-300"] $ input_ [class_ $ "rounded-md px-2 " <> inputClass, type_ "text", name_ "contactFormDataName", value_ $ showT name]
-                td_ [tableCellStyle_ "green-300"] $ input_ [class_ $ "rounded-md px-2 " <> inputClass, type_ "text", name_ "contactFormDataEmail", value_ $ showT email]
-                td_ [tableCellStyle_ "green-300"] $ do
+            tr_ [id_ editRowId] $ do
+                td_ [tableCellCss_ ""] $ toHtml cID
+                td_ [tableCellCss_ ""] $
+                    input_
+                        [ class_ $ "rounded-md px-2 border-2 " <> inputClass
+                        , type_ "text"
+                        , name_ "contactFormDataName"
+                        , value_ name
+                        ]
+                td_ [tableCellCss_ ""] $
+                    input_
+                        [ class_ $ "rounded-md px-2 border-2 " <> inputClass
+                        , type_ "text"
+                        , name_ "contactFormDataEmail"
+                        , value_ email
+                        ]
+                td_ [tableCellCss_ ""] $
                     form_ $ do
                         span_ [class_ "flex flex-col justify-center align-middle"] $ do
                             label_ [] $ do
@@ -470,8 +495,8 @@ instance ToHtml ContactForm where
                                     [ type_ "radio"
                                     , name_ "contactFormDataStatus"
                                     , value_ . Text.pack . show $ Active
-                                    , class_ $ " ml-2 " <> inputClass
-                                    , if status == Active then checked_ else class_ ""
+                                    , class_ $ "ml-2 " <> inputClass
+                                    , if status == Active then checked_ else noAttr_
                                     ]
                             label_ [] $ do
                                 "Inactive"
@@ -479,42 +504,41 @@ instance ToHtml ContactForm where
                                     [ type_ "radio"
                                     , name_ "contactFormDataStatus"
                                     , value_ . Text.pack . show $ Inactive
-                                    , class_ $ " ml-2 " <> inputClass
-                                    , if status == Inactive then checked_ else class_ ""
+                                    , class_ $ "ml-2 " <> inputClass
+                                    , if status == Inactive then checked_ else noAttr_
                                     ]
-                td_ [tableCellStyle_ "green-300"] $
+                td_ [tableCellCss_ ""] $
                     span_ [class_ "flex flex-row justify-center align-middle"] $ do
                         button_
-                            [ tableButtonStyle_ "green-500"
-                            , class_ " mr-2 "
+                            [ buttonCss_ "mr-2 bg-green-500"
                             , hxExt_ "json-enc"
                             , hxPatchSafe_ $ patchContactLink cID
-                            , hxTarget_ $ "#"<>rowID
+                            , hxTarget_ $ "#" <> editRowId
                             , hxSwap_ "outerHTML"
-                            , hxInclude_ $ "."<>inputClass
+                            , hxInclude_ $ "." <> inputClass
                             ]
                             "Save"
                         button_
-                            [ tableButtonStyle_ "red-500"
+                            [ buttonCss_ "bg-red-400"
                             , hxGetSafe_ $ getContactLink cID
-                            , hxTarget_ $ "#"<>rowID
+                            , hxTarget_ $ "#" <> editRowId
                             , hxSwap_ "outerHTML"
                             ]
                             "Cancel"
     toHtmlRaw = toHtml
 
-instance ToHtml [Contact] where
-    toHtml contacts = baseHtml "Contact Table" $ do
+instance ToHtml ContactTable where
+    toHtml contacts = baseTemplate "Contact Table" $ do
         script_ "document.body.addEventListener('htmx:beforeSwap',function(e){'add-contact-row'===e.detail.target.id&&Array.from(document.getElementsByClassName('add-contact-form-input')).map(e=>{e.value&&(e.value=e.defaultValue),e.checked&&(e.checked=e.defaultChecked)})});"
-        div_ [class_ "flex items-center justify-center h-screen"] $ do
+        div_ [class_ "flex items-center justify-center h-screen"] $
             table_ [class_ "table-auto rounded-lg"] $ do
-                thead_ [] $ do
+                thead_ [] $
                     tr_ [] $ do
-                        th_ [tableCellStyle_ "yellow-200", class_ " text-lg "] "ID"
-                        th_ [tableCellStyle_ "yellow-200", class_ " text-lg "] "Name"
-                        th_ [tableCellStyle_ "yellow-200", class_ " text-lg "] "Email"
-                        th_ [tableCellStyle_ "yellow-200", class_ " text-lg "] "Status"
-                        th_ [tableCellStyle_ "yellow-200", class_ " text-lg "] "Action(s)"
+                        th_ [tableHeaderCss_ ""] "ID"
+                        th_ [tableHeaderCss_ ""] "Name"
+                        th_ [tableHeaderCss_ ""] "Email"
+                        th_ [tableHeaderCss_ ""] "Status"
+                        th_ [tableHeaderCss_ ""] "Action(s)"
                 tbody_ $ do
                     Prelude.mapM_ toHtml contacts
                     toHtml $ ContactForm Nothing
