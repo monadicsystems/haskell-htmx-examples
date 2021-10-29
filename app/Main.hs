@@ -4,8 +4,6 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON)
 import Data.Int
--- import Data.ByteString.Lazy
--- import Data.ByteString.Char8
 import Data.Profunctor
 import Data.Proxy
 import Data.Text
@@ -46,6 +44,7 @@ readT = read . Text.unpack
 noHtml :: Html ()
 noHtml = ""
 
+-- forall a. Text -> Html a -> Html a
 baseTemplate :: Monad m => Text -> HtmlT m a -> HtmlT m a
 baseTemplate title innerHtml = do
     doctype_
@@ -518,7 +517,7 @@ instance ToHtml ContactForm where
     toHtmlRaw = toHtml
 
 instance ToHtml ContactTable where
-    toHtml contacts = baseTemplate "Contact Table" $ do
+    toHtml contactTable = baseTemplate "Contact Table" $ do
         script_ "document.body.addEventListener('htmx:beforeSwap',function(e){'add-contact-row'===e.detail.target.id&&Array.from(document.getElementsByClassName('add-contact-form-input')).map(e=>{e.value&&(e.value=e.defaultValue),e.checked&&(e.checked=e.defaultChecked)})});"
         div_ [class_ "flex items-center justify-center h-screen"] $
             table_ [class_ "table-auto rounded-lg"] $ do
@@ -530,7 +529,7 @@ instance ToHtml ContactTable where
                         th_ [tableHeaderCss_ ""] "Status"
                         th_ [tableHeaderCss_ ""] "Action(s)"
                 tbody_ $ do
-                    Prelude.mapM_ toHtml contacts
+                    Prelude.mapM_ toHtml contactTable
                     toHtml $ ContactForm Nothing
     toHtmlRaw = toHtml
 
