@@ -1,35 +1,18 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE QuasiQuotes #-}
-
 module Main where
 
-import Contravariant.Extras.Contrazip (contrazip3)
+import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON)
-import Data.Functor.Identity (Identity)
 import Data.Int
-import Data.Functor.Contravariant
+-- import Data.ByteString.Lazy
+-- import Data.ByteString.Char8
 import Data.Profunctor
 import Data.Proxy
 import Data.Text
-import Data.Tuple.Curry
 import Data.Vector (Vector)
 import GHC.Generics
-import GHC.TypeLits
 import Hasql.TH
-import Hasql.Session (Session)
+import Hasql.Session (Session, QueryError)
 import Hasql.Statement (Statement(..))
 import Lucid
 import Lucid.Base (makeAttribute)
@@ -39,15 +22,13 @@ import Network.Wai.Handler.Warp
 import Prelude
 import Servant.API
 import Servant.HTML.Lucid
-import Servant.Links
 import Servant.Server
 
-import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as ByteStringLazy
+import qualified Data.ByteString.Char8 as ByteStringChar8
 import qualified Data.Text as Text
 import qualified Data.Vector as Vector
 import qualified Hasql.Session as Session
-import qualified Hasql.Decoders as Decoders
-import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Connection as Connection
 
 
@@ -55,6 +36,9 @@ import qualified Hasql.Connection as Connection
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+showB :: Show a => a -> ByteStringLazy.ByteString
+showB = ByteStringLazy.fromStrict . ByteStringChar8.pack . show
 
 readT :: Read a => Text -> a
 readT = read . Text.unpack
@@ -120,10 +104,7 @@ data ContactFormData = ContactFormData
 {- SQL STATEMENTS START -}
 
 dropContactsTable :: Session ()
-dropContactsTable = Session.sql
-    [uncheckedSql|
-        drop table if exists contacts;
-    |]
+dropContactsTable = Session.sql [uncheckedSql| drop table if exists contacts |]
 
 createContactsTable :: Session ()
 createContactsTable = Session.sql
@@ -134,7 +115,7 @@ createContactsTable = Session.sql
             email varchar (255) unique not null,
             status varchar (10) not null,
             created_at timestamp with time zone default current_timestamp
-        );
+        )
     |]
 
 -- cfd -> ContactFormData
@@ -230,37 +211,24 @@ updateContactStatement =
 {- SQL STATEMENTS END -}
 
 {- SQL FUNCTIONS START -}
--- TODO: Add explicit error handling to database functions
 
-insertCfd :: Connection.Connection -> ContactFormData -> IO Contact
-insertCfd conn cfd = do
-    Right res <- Session.run (Session.statement cfd insertCfdStatement) conn
-    pure res
+insertCfd :: Connection.Connection -> ContactFormData -> IO (Either QueryError Contact)
+insertCfd conn cfd = Session.run (Session.statement cfd insertCfdStatement) conn
 
-insertCfds :: Connection.Connection -> [ContactFormData] -> IO ()
-insertCfds conn cfds = do
-    res <- Session.run (Session.statement cfds insertCfdsStatement) conn
-    print res
+insertCfds :: Connection.Connection -> [ContactFormData] -> IO (Either QueryError ())
+insertCfds conn cfds = Session.run (Session.statement cfds insertCfdsStatement) conn
 
-selectContact :: Connection.Connection -> ID Contact -> IO Contact
-selectContact conn cID = do
-    Right res <- Session.run (Session.statement cID selectContactStatement) conn
-    pure res
+selectContact :: Connection.Connection -> ID Contact -> IO (Either QueryError Contact)
+selectContact conn cID = Session.run (Session.statement cID selectContactStatement) conn
 
-selectContactTable :: Connection.Connection -> IO ContactTable
-selectContactTable conn = do
-    Right res <- Session.run (Session.statement () selectContactTableStatement) conn
-    pure res
+selectContactTable :: Connection.Connection -> IO (Either QueryError ContactTable)
+selectContactTable conn = Session.run (Session.statement () selectContactTableStatement) conn
 
-deleteContact :: Connection.Connection -> ID Contact -> IO ()
-deleteContact conn cID = do
-    Right res <- Session.run (Session.statement cID deleteContactStatement) conn
-    pure res
+deleteContact :: Connection.Connection -> ID Contact -> IO (Either QueryError ())
+deleteContact conn cID = Session.run (Session.statement cID deleteContactStatement) conn
 
-updateContact :: Connection.Connection -> (ID Contact, ContactFormData) -> IO Contact
-updateContact conn cfdWithID = do
-    Right res <- Session.run (Session.statement cfdWithID updateContactStatement) conn
-    pure res
+updateContact :: Connection.Connection -> (ID Contact, ContactFormData) -> IO (Either QueryError Contact)
+updateContact conn cfdWithID = Session.run (Session.statement cfdWithID updateContactStatement) conn
 
 {- SQL FUNCTIONS START -}
 
@@ -320,24 +288,46 @@ apiProxy = Proxy
 {- HANDLERS START -}
 
 getContactTableHandler :: Connection.Connection -> Handler ContactTable
-getContactTableHandler = liftIO . selectContactTable
+getContactTableHandler conn = do
+    res <- liftIO $ selectContactTable conn
+    case res of
+        Left queryErr      -> throwError $ err404 { errBody = showB queryErr }
+        Right contactTable -> pure contactTable
 
 getContactHandler :: Connection.Connection -> ID Contact -> Handler Contact
-getContactHandler conn = liftIO . selectContact conn
+getContactHandler conn cID = do
+    res <- liftIO $ selectContact conn cID
+    case res of
+        Left queryErr -> throwError $ err404 { errBody = showB queryErr }
+        Right contact -> pure contact
 
 postContactHandler :: Connection.Connection -> ContactFormData -> Handler Contact
-postContactHandler conn = liftIO . insertCfd conn
+postContactHandler conn cfd = do
+    res <- liftIO $ insertCfd conn cfd
+    case res of
+        Left queryErr -> throwError $ err404 { errBody = showB queryErr }
+        Right contact -> pure contact
 
 deleteContactHandler :: Connection.Connection -> ID Contact -> Handler NoContent
-deleteContactHandler conn cID = liftIO $ deleteContact conn cID >> pure NoContent
+deleteContactHandler conn cID = do
+    res <- liftIO $ deleteContact conn cID
+    case res of
+        Left queryErr -> throwError $ err404 { errBody = showB queryErr }
+        Right _       -> pure NoContent
 
 patchContactHandler :: Connection.Connection -> ID Contact -> ContactFormData -> Handler Contact
-patchContactHandler conn cID cfd = liftIO $ updateContact conn (cID, cfd)
+patchContactHandler conn cID cfd = do
+    res <- liftIO $ updateContact conn (cID, cfd)
+    case res of
+        Left queryErr -> throwError $ err404 { errBody = showB queryErr }
+        Right contact -> pure contact
 
 getContactFormHandler :: Connection.Connection -> ID Contact -> Handler ContactForm
 getContactFormHandler conn cID = do
-    contact <- liftIO $ selectContact conn cID
-    pure $ ContactForm $ Just contact
+    res <- liftIO $ selectContact conn cID
+    case res of
+        Left queryErr -> throwError $ err404 { errBody = showB queryErr }
+        Right contact -> pure $ ContactForm $ Just contact
 
 server :: Connection.Connection -> Server API
 server conn = getContactTableHandler conn
@@ -559,10 +549,9 @@ main = do
     case connResult of
         Left err -> print err
         Right conn -> do
-            Session.run dropContactsTable conn
-            Session.run createContactsTable conn
-            insertCfds conn initialCfds
-
+            _ <- Session.run dropContactsTable conn
+            _ <- Session.run createContactsTable conn
+            _ <- insertCfds conn initialCfds
             let port = 8080
                 application = serve @API Proxy $ server conn
 

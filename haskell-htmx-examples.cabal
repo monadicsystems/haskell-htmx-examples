@@ -33,11 +33,13 @@ library
   build-depends:
       aeson
     , base >=4.7 && <5
+    , bytestring
     , contravariant-extras
     , hasql
     , hasql-th
     , lucid
     , lucid-htmx ==0.1.0.0
+    , mtl
     , profunctors
     , servant
     , servant-lucid
@@ -54,16 +56,32 @@ executable haskell-htmx-examples-exe
       Paths_haskell_htmx_examples
   hs-source-dirs:
       app
+  default-extensions:
+      DataKinds
+      DeriveAnyClass
+      DeriveGeneric
+      DerivingStrategies
+      FlexibleInstances
+      GeneralizedNewtypeDeriving
+      InstanceSigs
+      KindSignatures
+      LambdaCase
+      OverloadedStrings
+      TypeApplications
+      TypeOperators
+      QuasiQuotes
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
     , base >=4.7 && <5
+    , bytestring
     , contravariant-extras
     , haskell-htmx-examples
     , hasql
     , hasql-th
     , lucid
     , lucid-htmx ==0.1.0.0
+    , mtl
     , profunctors
     , servant
     , servant-lucid
@@ -85,12 +103,14 @@ test-suite haskell-htmx-examples-test
   build-depends:
       aeson
     , base >=4.7 && <5
+    , bytestring
     , contravariant-extras
     , haskell-htmx-examples
     , hasql
     , hasql-th
     , lucid
     , lucid-htmx ==0.1.0.0
+    , mtl
     , profunctors
     , servant
     , servant-lucid

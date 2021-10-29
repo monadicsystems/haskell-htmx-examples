@@ -22,11 +22,13 @@ description:         Please see the README on GitHub at <https://github.com/gith
 dependencies:
 - aeson
 - base >= 4.7 && < 5
+- bytestring
 - contravariant-extras
 - hasql
 - hasql-th
 - lucid
 - lucid-htmx == 0.1.0.0
+- mtl
 - profunctors
 - servant
 - servant-lucid
@@ -49,6 +51,20 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - haskell-htmx-examples
+    default-extensions:
+      - DataKinds
+      - DeriveAnyClass
+      - DeriveGeneric
+      - DerivingStrategies
+      - FlexibleInstances
+      - GeneralizedNewtypeDeriving
+      - InstanceSigs
+      - KindSignatures
+      - LambdaCase
+      - OverloadedStrings
+      - TypeApplications
+      - TypeOperators
+      - QuasiQuotes
 
 tests:
   haskell-htmx-examples-test:
